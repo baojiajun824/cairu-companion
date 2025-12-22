@@ -1,0 +1,81 @@
+# Development overrides for docker-compose.yml
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+version: "3.9"
+
+services:
+  gateway:
+    build:
+      context: ./services/gateway
+      target: development
+    volumes:
+      - ./services/gateway/src:/app/src:ro
+      - ./shared:/app/shared:ro
+    environment:
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+
+  vad:
+    build:
+      context: ./services/vad
+      target: development
+    volumes:
+      - ./services/vad/src:/app/src:ro
+      - ./shared:/app/shared:ro
+    environment:
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+
+  asr:
+    build:
+      context: ./services/asr
+      target: development
+    volumes:
+      - ./services/asr/src:/app/src:ro
+      - ./shared:/app/shared:ro
+    environment:
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+      # Use tiny model for faster dev iteration
+      - WHISPER_MODEL=tiny.en
+
+  orchestrator:
+    build:
+      context: ./services/orchestrator
+      target: development
+    volumes:
+      - ./services/orchestrator/src:/app/src:ro
+      - ./shared:/app/shared:ro
+      - ./config:/app/config:ro
+    environment:
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+
+  llm:
+    build:
+      context: ./services/llm
+      target: development
+    volumes:
+      - ./services/llm/src:/app/src:ro
+      - ./shared:/app/shared:ro
+    environment:
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+
+  tts:
+    build:
+      context: ./services/tts
+      target: development
+    volumes:
+      - ./services/tts/src:/app/src:ro
+      - ./shared:/app/shared:ro
+    environment:
+      - LOG_LEVEL=DEBUG
+      - RELOAD=true
+
+  # Always enable observability in development
+  prometheus:
+    profiles: []  # Override to always run
+  
+  grafana:
+    profiles: []  # Override to always run

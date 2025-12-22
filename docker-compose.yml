@@ -1,0 +1,207 @@
+# =============================================================================
+# cAIru Base Station - Alpha (Simplified)
+# =============================================================================
+# Core pipeline only: Gateway → VAD → ASR → Orchestrator → LLM → TTS
+# Single device, no authentication, no dashboard
+
+services:
+  # =============================================================================
+  # Infrastructure
+  # =============================================================================
+  
+  redis:
+    image: redis:7-alpine
+    container_name: cairu-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: cairu-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # =============================================================================
+  # Core Pipeline Services
+  # =============================================================================
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    container_name: cairu-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=INFO
+      - OTEL_SERVICE_NAME=gateway
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+    restart: unless-stopped
+
+  vad:
+    build:
+      context: .
+      dockerfile: services/vad/Dockerfile
+    container_name: cairu-vad
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - LOG_LEVEL=INFO
+      - OTEL_SERVICE_NAME=vad
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+      - vad_models:/app/models
+    restart: unless-stopped
+
+  asr:
+    build:
+      context: .
+      dockerfile: services/asr/Dockerfile
+    container_name: cairu-asr
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - WHISPER_MODEL=small.en
+      - LOG_LEVEL=INFO
+      - OTEL_SERVICE_NAME=asr
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+      - asr_models:/app/models
+    restart: unless-stopped
+
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+    container_name: cairu-orchestrator
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_PATH=/app/data/cairu.db
+      - LOG_LEVEL=INFO
+      - OTEL_SERVICE_NAME=orchestrator
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+      - ./config:/app/config:ro
+      - orchestrator_data:/app/data
+    restart: unless-stopped
+
+  llm:
+    build:
+      context: .
+      dockerfile: services/llm/Dockerfile
+    container_name: cairu-llm
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_URL=http://ollama:11434
+      - LLM_MODEL=phi3:mini
+      - LLM_BACKEND=ollama
+      - LOG_LEVEL=INFO
+      - OTEL_SERVICE_NAME=llm
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+    restart: unless-stopped
+
+  tts:
+    build:
+      context: .
+      dockerfile: services/tts/Dockerfile
+    container_name: cairu-tts
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PIPER_VOICE=en_US-lessac-medium
+      - LOG_LEVEL=INFO
+      - OTEL_SERVICE_NAME=tts
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared:/app/shared:ro
+      - tts_models:/app/models
+    restart: unless-stopped
+
+  # =============================================================================
+  # Observability (optional - enable with: docker compose --profile observability up)
+  # =============================================================================
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: cairu-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    profiles:
+      - observability
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: cairu-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=cairu-alpha
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    profiles:
+      - observability
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  ollama_data:
+  vad_models:
+  asr_models:
+  tts_models:
+  orchestrator_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  default:
+    name: cairu-network

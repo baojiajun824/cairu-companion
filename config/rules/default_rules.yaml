@@ -1,0 +1,272 @@
+# =============================================================================
+# cAIru Proactive Rules Configuration
+# =============================================================================
+# These rules define when the companion should proactively initiate interaction.
+# Aaron mentioned 26 rule contexts - this is a starting set for Alpha.
+
+rules:
+  # =========================================================================
+  # Time-Based Rules (Daily Check-ins)
+  # =========================================================================
+
+  - name: morning_greeting
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "07:00"
+        end: "09:00"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "Good morning! How did you sleep? I hope you're feeling rested today."
+    priority: 1
+    tags: [daily, wellness]
+
+  - name: breakfast_reminder
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "08:00"
+        end: "09:30"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "Have you had breakfast yet? It's important to start the day with something to eat."
+    priority: 2
+    tags: [daily, nutrition]
+
+  - name: morning_medication
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "08:00"
+        end: "10:00"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "It might be time for your morning medication. Would you like me to remind you what to take?"
+    priority: 1
+    tags: [medication, health]
+
+  - name: midday_checkin
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "11:30"
+        end: "12:30"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "How is your morning going? Have you been up and about?"
+    priority: 3
+    tags: [daily, wellness]
+
+  - name: lunch_reminder
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "12:00"
+        end: "13:30"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "It's lunchtime. Have you had something to eat?"
+    priority: 2
+    tags: [daily, nutrition]
+
+  - name: afternoon_activity
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "14:00"
+        end: "15:00"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "The afternoon is a lovely time for a little activity. Have you stretched your legs today?"
+    priority: 3
+    tags: [daily, activity]
+
+  - name: evening_medication
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "17:00"
+        end: "19:00"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "It might be time for your evening medication. Shall I remind you?"
+    priority: 1
+    tags: [medication, health]
+
+  - name: dinner_reminder
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "17:30"
+        end: "19:00"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "Dinner time is approaching. Have you thought about what you'd like to eat?"
+    priority: 2
+    tags: [daily, nutrition]
+
+  - name: evening_winddown
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "19:30"
+        end: "21:00"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "The evening is here. How was your day? Anything nice happen?"
+    priority: 2
+    tags: [daily, social]
+
+  - name: bedtime_preparation
+    type: time_based
+    enabled: true
+    trigger:
+      time_range:
+        start: "21:00"
+        end: "22:00"
+    frequency: daily
+    cooldown_hours: 20
+    prompt: "It's getting late. Are you getting ready for bed? A good night's rest is important."
+    priority: 2
+    tags: [daily, sleep]
+
+  # =========================================================================
+  # Behavioral Rules (Response to User State)
+  # =========================================================================
+
+  - name: extended_silence_check
+    type: behavioral
+    enabled: true
+    trigger:
+      silence_duration_minutes: 120
+    prompt: "I haven't heard from you in a while. I just wanted to check in. Is everything okay?"
+    priority: 2
+    tags: [wellness, safety]
+
+  - name: long_silence_alert
+    type: behavioral
+    enabled: true
+    trigger:
+      silence_duration_minutes: 240
+    prompt: "It's been quite a while since we chatted. I'm here if you need anything at all."
+    priority: 1
+    emit_event: true
+    event_type: withdrawal
+    event_severity: warning
+    tags: [wellness, safety, alert]
+
+  - name: distress_followup
+    type: behavioral
+    enabled: true
+    trigger:
+      after_intent: distress
+      delay_minutes: 30
+    prompt: "I wanted to check back in with you. Are you feeling any better?"
+    priority: 1
+    tags: [wellness, emotional]
+
+  - name: confusion_support
+    type: behavioral
+    enabled: true
+    trigger:
+      after_intent: confusion
+      delay_minutes: 15
+    prompt: "I'm still here with you. Is there anything I can help you remember?"
+    priority: 1
+    tags: [cognitive, support]
+
+  # =========================================================================
+  # Care Plan Rules (Based on Schedule)
+  # =========================================================================
+
+  - name: appointment_reminder
+    type: care_plan
+    enabled: true
+    trigger:
+      event: appointment_upcoming
+      lead_time_minutes: 60
+    prompt: "You have an appointment coming up. Would you like me to tell you about it?"
+    priority: 1
+    tags: [schedule, health]
+
+  - name: visitor_expected
+    type: care_plan
+    enabled: true
+    trigger:
+      event: visitor_scheduled
+      lead_time_minutes: 30
+    prompt: "You have a visitor coming soon. How exciting!"
+    priority: 2
+    tags: [social, schedule]
+
+  - name: activity_reminder
+    type: care_plan
+    enabled: true
+    trigger:
+      event: activity_scheduled
+      lead_time_minutes: 15
+    prompt: "There's an activity scheduled for you. Would you like to know more?"
+    priority: 3
+    tags: [activity, schedule]
+
+  # =========================================================================
+  # Weekly Rules
+  # =========================================================================
+
+  - name: weekly_family_reminder
+    type: time_based
+    enabled: true
+    trigger:
+      day_of_week: sunday
+      time_range:
+        start: "10:00"
+        end: "12:00"
+    frequency: weekly
+    cooldown_hours: 144  # 6 days
+    prompt: "Sunday is a lovely day to think about family. Have you heard from anyone recently?"
+    priority: 3
+    tags: [social, family, weekly]
+
+  - name: weekend_reflection
+    type: time_based
+    enabled: true
+    trigger:
+      day_of_week: saturday
+      time_range:
+        start: "14:00"
+        end: "16:00"
+    frequency: weekly
+    cooldown_hours: 144
+    prompt: "It's the weekend. Sometimes I like to think about happy memories. Do you have a favorite one you'd like to share?"
+    priority: 3
+    tags: [social, memory, weekly]
+
+# =============================================================================
+# Rule Configuration Metadata
+# =============================================================================
+
+settings:
+  # Global cooldown between any proactive interaction
+  min_interaction_gap_minutes: 30
+
+  # Maximum proactive interactions per day
+  max_daily_interactions: 12
+
+  # Quiet hours (no proactive interactions)
+  quiet_hours:
+    start: "22:00"
+    end: "07:00"
+
+  # Priority thresholds (lower number = higher priority)
+  # Only priority 1 rules can override quiet hours
+  critical_priority: 1
+

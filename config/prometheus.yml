@@ -1,0 +1,33 @@
+# Prometheus configuration for cAIru Base Station
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers: []
+
+rule_files: []
+
+scrape_configs:
+  # Prometheus itself
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # cAIru services
+  - job_name: "cairu-gateway"
+    static_configs:
+      - targets: ["gateway:8080"]
+    metrics_path: /metrics
+
+  - job_name: "cairu-dashboard-api"
+    static_configs:
+      - targets: ["dashboard-api:8081"]
+    metrics_path: /metrics
+
+  # Docker host metrics (if node-exporter is running)
+  # - job_name: "node"
+  #   static_configs:
+  #     - targets: ["host.docker.internal:9100"]
+
