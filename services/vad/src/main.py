@@ -83,12 +83,13 @@ class VADService:
                 logger.error("vad_processing_error", message_id=message_id, error=str(e))
 
     async def _process_segment(self, data: dict):
-        """Process a single audio segment."""
+        """Process audio segment with boundary detection."""
         start_time = datetime.utcnow()
 
         device_id = data.get("device_id", "unknown")
         session_id = data.get("session_id", "unknown")
         audio_data = data.get("audio_data")
+        is_streaming = data.get("is_streaming", False)
 
         if not audio_data:
             logger.warning("empty_audio_segment", device_id=device_id)
@@ -99,38 +100,59 @@ class VADService:
             import base64
             audio_data = base64.b64decode(audio_data)
 
-        # Run VAD
-        has_speech, probability = await self.vad.detect(audio_data)
-
         # Record latency
         latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
         VAD_LATENCY.observe(latency_ms)
 
-        logger.debug(
-            "vad_result",
-            device_id=device_id,
-            has_speech=has_speech,
-            probability=round(probability, 3),
-            latency_ms=round(latency_ms, 2),
-        )
+        if is_streaming:
+            # Streaming mode: use boundary detection
+            speech_ended, full_audio = await self.vad.process_with_boundary(
+                session_id, audio_data
+            )
+            
+            if speech_ended and full_audio:
+                # Forward complete utterance to ASR
+                result = VADResult(
+                    device_id=device_id,
+                    session_id=session_id,
+                    has_speech=True,
+                    speech_probability=1.0,
+                    audio_data=full_audio,
+                    duration_ms=len(full_audio) // 32,
+                )
 
-        # Only forward if speech detected
-        if has_speech:
-            result = VADResult(
+                await self.redis.publish(
+                    RedisStreamClient.STREAMS["audio_segments"],
+                    result,
+                )
+                logger.info("utterance_forwarded_to_asr", device_id=device_id, duration_ms=len(full_audio) // 32)
+        else:
+            # Legacy mode: simple pass-through for complete utterances
+            has_speech, probability = await self.vad.detect(audio_data)
+
+            logger.debug(
+                "vad_result",
                 device_id=device_id,
-                session_id=session_id,
-                has_speech=True,
-                speech_probability=probability,
-                audio_data=audio_data,
-                duration_ms=len(audio_data) // 32,
+                has_speech=has_speech,
+                probability=round(probability, 3),
+                latency_ms=round(latency_ms, 2),
             )
 
-            await self.redis.publish(
-                RedisStreamClient.STREAMS["audio_segments"],
-                result,
-            )
+            if has_speech:
+                result = VADResult(
+                    device_id=device_id,
+                    session_id=session_id,
+                    has_speech=True,
+                    speech_probability=probability,
+                    audio_data=audio_data,
+                    duration_ms=len(audio_data) // 32,
+                )
 
-            logger.debug("speech_forwarded_to_asr", device_id=device_id)
+                await self.redis.publish(
+                    RedisStreamClient.STREAMS["audio_segments"],
+                    result,
+                )
+                logger.debug("speech_forwarded_to_asr", device_id=device_id)
 
 
 async def main():

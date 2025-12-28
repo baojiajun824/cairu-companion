@@ -38,6 +38,7 @@ class AudioRouter:
         device_id: str,
         audio_data: bytes,
         is_final: bool = False,
+        is_streaming: bool = False,
     ) -> str:
         """
         Route incoming audio from Companion device to the processing pipeline.
@@ -46,6 +47,7 @@ class AudioRouter:
             device_id: Source device ID
             audio_data: Raw audio bytes (expected: 16kHz, 16-bit PCM)
             is_final: Whether this is the final segment of an utterance
+            is_streaming: If True, server VAD does boundary detection
 
         Returns:
             Message ID from Redis
@@ -61,13 +63,17 @@ class AudioRouter:
             is_final=is_final,
         )
 
-        # Track when we started processing
-        self._pending_requests[segment.session_id] = datetime.utcnow()
+        # Track when we started processing (only for non-streaming)
+        if not is_streaming:
+            self._pending_requests[segment.session_id] = datetime.utcnow()
 
-        # Publish to VAD service
+        # Publish to VAD service with streaming flag
+        message_data = segment.model_dump(mode="json")
+        message_data["is_streaming"] = is_streaming
+        
         message_id = await self.redis.publish(
             RedisStreamClient.STREAMS["audio_inbound"],
-            segment,
+            message_data,
         )
 
         AUDIO_SEGMENTS_RECEIVED.labels(device_id=device_id).inc()
@@ -76,7 +82,7 @@ class AudioRouter:
             "audio_routed",
             device_id=device_id,
             duration_ms=segment.duration_ms,
-            message_id=message_id,
+            is_streaming=is_streaming,
         )
 
         return message_id

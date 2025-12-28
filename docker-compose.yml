@@ -125,7 +125,7 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379
       - OLLAMA_URL=http://ollama:11434
-      - LLM_MODEL=phi3:mini
+      - LLM_MODEL=qwen2:0.5b
       - LLM_BACKEND=ollama
       - LOG_LEVEL=INFO
       - OTEL_SERVICE_NAME=llm

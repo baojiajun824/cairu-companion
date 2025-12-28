@@ -135,9 +135,12 @@ async def websocket_endpoint(websocket: WebSocket):
     Simplified for Alpha: No device_id in URL, single device assumed.
 
     Protocol:
-    - Client sends binary audio frames
+    - Client sends binary audio frames OR JSON with streaming flag
     - Server sends JSON messages with audio (base64) and metadata
     """
+    import base64
+    import json
+    
     manager: ConnectionManager = app.state.connection_manager
     router: AudioRouter = app.state.audio_router
 
@@ -151,11 +154,25 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         while True:
-            # Receive audio data from Companion
-            data = await websocket.receive_bytes()
-
-            # Route to processing pipeline
-            await router.route_audio(device_id, data)
+            # Receive message (can be binary or text)
+            message = await websocket.receive()
+            
+            if "bytes" in message:
+                # Binary audio - legacy mode (client does VAD)
+                data = message["bytes"]
+                await router.route_audio(device_id, data, is_streaming=False)
+                
+            elif "text" in message:
+                # JSON message - streaming mode (server does VAD)
+                try:
+                    payload = json.loads(message["text"])
+                    if payload.get("type") == "audio_stream":
+                        audio_b64 = payload.get("audio", "")
+                        audio_data = base64.b64decode(audio_b64)
+                        is_streaming = payload.get("is_streaming", True)
+                        await router.route_audio(device_id, audio_data, is_streaming=is_streaming)
+                except json.JSONDecodeError:
+                    logger.warning("invalid_json_message", device_id=device_id)
 
     except WebSocketDisconnect:
         logger.info("companion_disconnected", device_id=device_id)

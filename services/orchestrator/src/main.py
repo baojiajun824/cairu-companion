@@ -127,7 +127,7 @@ class OrchestratorService:
             care_plan=care_plan,
         )
 
-        # Create LLM request (keep responses SHORT for natural conversation)
+        # Create LLM request
         request = LLMRequest(
             request_id=str(uuid.uuid4()),
             device_id=device_id,
@@ -138,7 +138,7 @@ class OrchestratorService:
             user_profile=user_profile,
             care_plan_context=care_plan,
             system_prompt=system_prompt,
-            max_tokens=60,  # Allow complete short sentences
+            max_tokens=80,
             temperature=0.7,
         )
 
@@ -176,33 +176,21 @@ class OrchestratorService:
                 logger.error("llm_response_error", message_id=message_id, error=str(e))
 
     async def _handle_llm_response(self, data: dict):
-        """Handle LLM response and forward to TTS."""
-        device_id = data.get("device_id", "unknown")
+        """Handle LLM response - store in history (TTS is handled by LLM service directly)."""
         session_id = data.get("session_id", "unknown")
-        request_id = data.get("request_id", "unknown")
         text = data.get("text", "")
 
         logger.info("llm_response_received", text=text[:50])
 
-        # Store assistant turn
+        # Store assistant turn in conversation history
         await self.state_manager.add_turn(
             session_id=session_id,
             role="assistant",
             content=text,
         )
-
-        # Send to TTS
-        tts_request = TTSRequest(
-            request_id=request_id,
-            device_id=device_id,
-            session_id=session_id,
-            text=text,
-        )
-
-        await self.redis.publish(
-            RedisStreamClient.STREAMS["tts_requests"],
-            tts_request,
-        )
+        
+        # Note: TTS requests are now sent directly by LLM service
+        # for sentence-level streaming (lower latency)
 
     async def _run_proactive_rules(self):
         """Run proactive rules engine for scheduled interactions."""

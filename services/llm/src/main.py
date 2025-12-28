@@ -5,6 +5,7 @@ Handles language model inference using Ollama (local).
 Consumes from llm:requests and publishes to llm:responses.
 
 Simplified for Alpha: Local Ollama only, no event extraction.
+Supports sentence-level streaming to TTS for lower latency.
 """
 
 import asyncio
@@ -14,7 +15,7 @@ from datetime import datetime
 from cairu_common.config import get_llm_settings
 from cairu_common.logging import setup_logging, get_logger
 from cairu_common.redis_client import RedisStreamClient
-from cairu_common.models import LLMResponse, Intent
+from cairu_common.models import LLMResponse, TTSRequest, Intent
 from cairu_common.metrics import LLM_LATENCY, LLM_TOKENS_USED, LLM_FALLBACK_COUNT, set_service_info, set_component_health
 
 from src.backends.ollama import OllamaBackend
@@ -106,7 +107,7 @@ class LLMService:
                 logger.error("llm_processing_error", message_id=message_id, error=str(e))
 
     async def _handle_request(self, data: dict):
-        """Handle an LLM request and generate response."""
+        """Handle an LLM request with sentence-level streaming to TTS."""
         start_time = datetime.utcnow()
 
         request_id = data.get("request_id", "unknown")
@@ -131,53 +132,108 @@ class LLMService:
         messages.extend(conversation_history)
         messages.append({"role": "user", "content": user_message})
 
-        # Generate response
-        result = await self.router.generate(
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        # Get Ollama backend for streaming
+        ollama_backend = self.router.backends.get("ollama")
+        
+        if ollama_backend is None:
+            # Fallback to non-streaming
+            result = await self.router.generate(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            full_text = result.get("text", "I'm here for you.")
+            tokens_used = result.get("tokens_used", 0)
+            is_fallback = result.get("is_fallback", False)
+            
+            # Send single TTS request
+            tts_request = TTSRequest(
+                request_id=request_id,
+                device_id=device_id,
+                session_id=session_id,
+                text=full_text,
+            )
+            await self.redis.publish(
+                RedisStreamClient.STREAMS["tts_requests"],
+                tts_request,
+            )
+        else:
+            # Stream sentences - send each to TTS immediately
+            full_text_parts = []
+            tokens_used = 0
+            is_fallback = False
+            sentence_idx = 0
+            
+            async for chunk in ollama_backend.generate_streaming(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            ):
+                sentence = chunk.get("sentence", "")
+                is_final = chunk.get("is_final", False)
+                
+                if sentence:
+                    full_text_parts.append(sentence)
+                    
+                    # Send sentence to TTS immediately
+                    tts_request = TTSRequest(
+                        request_id=f"{request_id}-{sentence_idx}",
+                        device_id=device_id,
+                        session_id=session_id,
+                        text=sentence,
+                    )
+                    await self.redis.publish(
+                        RedisStreamClient.STREAMS["tts_requests"],
+                        tts_request,
+                    )
+                    logger.info("sentence_to_tts", idx=sentence_idx, text=sentence[:40])
+                    sentence_idx += 1
+                
+                if is_final:
+                    tokens_used = chunk.get("tokens_used", 0)
+                    break
+            
+            full_text = " ".join(full_text_parts) if full_text_parts else "I'm here for you."
 
         # Calculate latency
         latency_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
 
         # Record metrics
         LLM_LATENCY.labels(
-            model=result.get("model", "unknown"),
-            backend=result.get("backend", "unknown"),
+            model=settings.llm_model,
+            backend="ollama",
         ).observe(latency_ms)
 
-        if result.get("tokens_used"):
+        if tokens_used:
             LLM_TOKENS_USED.labels(
-                model=result.get("model", "unknown"),
+                model=settings.llm_model,
                 type="completion",
-            ).inc(result["tokens_used"])
+            ).inc(tokens_used)
 
-        if result.get("is_fallback"):
-            LLM_FALLBACK_COUNT.labels(reason=result.get("fallback_reason", "unknown")).inc()
+        if is_fallback:
+            LLM_FALLBACK_COUNT.labels(reason="ollama_failed").inc()
 
         logger.info(
-            "llm_response_generated",
+            "llm_complete",
             request_id=request_id,
             latency_ms=round(latency_ms, 2),
-            is_fallback=result.get("is_fallback", False),
+            sentences=len(full_text_parts) if 'full_text_parts' in dir() else 1,
         )
 
-        # Build response
+        # Publish full response for orchestrator (history tracking)
         response = LLMResponse(
             request_id=request_id,
             device_id=device_id,
             session_id=session_id,
-            text=result.get("text", "I'm here for you."),
+            text=full_text,
             detected_intent=Intent.UNKNOWN,
             detected_events=[],
-            model=result.get("model", "unknown"),
+            model=settings.llm_model,
             latency_ms=int(latency_ms),
-            tokens_used=result.get("tokens_used", 0),
-            is_fallback=result.get("is_fallback", False),
+            tokens_used=tokens_used,
+            is_fallback=is_fallback,
         )
 
-        # Publish response
         await self.redis.publish(
             RedisStreamClient.STREAMS["llm_responses"],
             response,

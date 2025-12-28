@@ -66,7 +66,7 @@ class TTSSettings(Settings):
     """Settings specific to the TTS service."""
 
     service_name: str = "tts"
-    piper_voice: str = "en_US-lessac-medium"
+    piper_voice: str = "en_US-lessac-low"  # Faster voice (~200ms savings vs medium)
     piper_model_path: str = "/app/models"
 
 

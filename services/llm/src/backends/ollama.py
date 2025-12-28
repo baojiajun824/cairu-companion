@@ -1,6 +1,9 @@
 """Ollama backend for local LLM inference."""
 
-from typing import Any
+import json
+import re
+import time
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -8,6 +11,9 @@ from src.backends.base import LLMBackend
 from cairu_common.logging import get_logger
 
 logger = get_logger()
+
+# Sentence boundary pattern - matches sentence ending punctuation followed by space or end
+SENTENCE_SPLIT = re.compile(r'([.!?])\s+')
 
 
 class OllamaBackend(LLMBackend):
@@ -31,7 +37,7 @@ class OllamaBackend(LLMBackend):
         if self._client is None:
             self._client = httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=60.0,  # LLM inference can be slow
+                timeout=httpx.Timeout(60.0, connect=10.0),
             )
         return self._client
 
@@ -41,31 +47,170 @@ class OllamaBackend(LLMBackend):
         max_tokens: int = 150,
         temperature: float = 0.7,
     ) -> dict[str, Any]:
-        """Generate response using Ollama chat API."""
+        """Generate response using Ollama chat API with streaming."""
         client = await self._get_client()
+        
+        start_time = time.time()
+        first_token_time = None
+        full_text = []
+        tokens_used = 0
 
         try:
-            response = await client.post(
+            async with client.stream(
+                "POST",
                 "/api/chat",
                 json={
                     "model": self.model,
                     "messages": messages,
-                    "stream": False,
+                    "stream": True,
                     "options": {
                         "num_predict": max_tokens,
                         "temperature": temperature,
                     },
                 },
-            )
-            response.raise_for_status()
-            data = response.json()
+            ) as response:
+                response.raise_for_status()
+                
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    
+                    # Track time to first token
+                    if first_token_time is None:
+                        first_token_time = time.time()
+                        ttft_ms = (first_token_time - start_time) * 1000
+                        logger.info("llm_first_token", ttft_ms=round(ttft_ms, 2))
+                    
+                    # Extract content from chunk
+                    content = chunk.get("message", {}).get("content", "")
+                    if content:
+                        full_text.append(content)
+                    
+                    # Check if done
+                    if chunk.get("done", False):
+                        tokens_used = chunk.get("eval_count", 0)
+                        break
 
             return {
-                "text": data.get("message", {}).get("content", ""),
+                "text": "".join(full_text),
                 "model": self.model,
                 "backend": self.name,
-                "tokens_used": data.get("eval_count", 0),
+                "tokens_used": tokens_used,
             }
+
+        except httpx.HTTPError as e:
+            logger.error("ollama_request_failed", error=str(e))
+            raise
+
+    async def generate_streaming(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int = 150,
+        temperature: float = 0.7,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """
+        Generate response with sentence-level streaming.
+        
+        Yields sentences as they complete, enabling faster TTS processing.
+        Each yield contains: {"sentence": str, "is_final": bool, "tokens_used": int}
+        """
+        client = await self._get_client()
+        
+        start_time = time.time()
+        first_token_time = None
+        buffer = ""
+        tokens_used = 0
+
+        try:
+            async with client.stream(
+                "POST",
+                "/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": messages,
+                    "stream": True,
+                    "options": {
+                        "num_predict": max_tokens,
+                        "temperature": temperature,
+                    },
+                },
+            ) as response:
+                response.raise_for_status()
+                
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    
+                    # Track time to first token
+                    if first_token_time is None:
+                        first_token_time = time.time()
+                        ttft_ms = (first_token_time - start_time) * 1000
+                        logger.info("llm_first_token", ttft_ms=round(ttft_ms, 2))
+                    
+                    # Extract content from chunk
+                    content = chunk.get("message", {}).get("content", "")
+                    if content:
+                        buffer += content
+                        
+                        # Check for complete sentences in buffer
+                        # Split on sentence-ending punctuation followed by space
+                        parts = SENTENCE_SPLIT.split(buffer)
+                        
+                        # parts will be like: ["Hello", ".", " How are you", "?", " I'm fine"]
+                        # We need to reconstruct sentences
+                        if len(parts) > 1:
+                            sentences = []
+                            i = 0
+                            while i < len(parts) - 1:
+                                if parts[i+1] in '.!?':
+                                    sentences.append(parts[i] + parts[i+1])
+                                    i += 2
+                                else:
+                                    i += 1
+                            
+                            # Keep incomplete part in buffer
+                            buffer = parts[-1] if len(parts) % 2 == 1 else ""
+                            
+                            for sentence in sentences:
+                                sentence = sentence.strip()
+                                if sentence:
+                                    logger.info("llm_sentence_complete", sentence=sentence[:50])
+                                    yield {
+                                        "sentence": sentence,
+                                        "is_final": False,
+                                        "tokens_used": 0,
+                                    }
+                    
+                    # Check if done
+                    if chunk.get("done", False):
+                        tokens_used = chunk.get("eval_count", 0)
+                        break
+            
+            # Yield any remaining content
+            if buffer.strip():
+                logger.info("llm_final_fragment", fragment=buffer.strip()[:50])
+                yield {
+                    "sentence": buffer.strip(),
+                    "is_final": True,
+                    "tokens_used": tokens_used,
+                }
+            else:
+                # Send empty final marker
+                yield {
+                    "sentence": "",
+                    "is_final": True,
+                    "tokens_used": tokens_used,
+                }
 
         except httpx.HTTPError as e:
             logger.error("ollama_request_failed", error=str(e))

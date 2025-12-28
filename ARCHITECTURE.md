@@ -119,9 +119,10 @@ This document describes the Base Station architecture for the Alpha build.
 
 ### LLM Service
 - **Purpose**: Natural language generation
-- **Model**: Ollama with Phi-3 or Mistral 7B
+- **Model**: Ollama with qwen2:0.5b (fastest) or phi3:mini (better quality)
 - **Responsibilities**:
   - Generate conversational responses
+  - Sentence-level streaming to TTS
   - Fallback to static responses if needed
 
 ### TTS Service (Text-to-Speech)
@@ -149,19 +150,32 @@ This document describes the Base Station architecture for the Alpha build.
 
 ---
 
-## Latency Budget (<800ms target)
+## Latency Budget
+
+### Target (Ideal Hardware)
 
 | Stage | Target | Notes |
 |-------|--------|-------|
 | Audio transmission | 50ms | WebSocket, local network |
-| VAD | 10ms | Silero is very fast |
-| ASR | 300ms | Whisper small, streaming |
+| VAD | 10ms | Energy-based or Silero |
+| ASR | 300ms | Whisper streaming |
 | Orchestrator | 20ms | State lookup, prompt build |
-| LLM | 350ms | Quantized model, first token |
+| LLM | 350ms | With GPU acceleration |
 | TTS | 50ms | Piper streaming |
-| **Total** | **780ms** | Meets target with margin |
+| **Total** | **780ms** | Meets target with GPU |
 
-*Note: LLM inference is the bottleneck. Using small quantized models.*
+### Reality (N100 CPU-only)
+
+| Stage | Actual | Notes |
+|-------|--------|-------|
+| VAD | ~50ms | Energy-based detection |
+| ASR | ~800-1200ms | tiny.en model |
+| Orchestrator | ~50ms | SQLite queries |
+| LLM | ~3-6 seconds | qwen2:0.5b on CPU |
+| TTS | ~200-400ms | Piper low voice |
+| **Total** | **~5-8 seconds** | CPU bottleneck |
+
+*Note: LLM inference is the bottleneck on CPU. GPU or cloud API would dramatically improve.*
 
 ---
 
@@ -262,13 +276,41 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 
 ---
 
+## Connecting to Base Station
+
+### From Mac/PC (Testing)
+
+```bash
+# Set gateway to N100 IP
+python scripts/test_continuous.py --gateway ws://192.168.1.x:8080/ws
+```
+
+### From iPhone/Mobile
+
+**Option 1: Web Client** (Easiest)
+- Build a simple HTML5 web page with WebSocket + Web Audio API
+- Host on N100, access via `http://192.168.1.x:8080`
+- Works in Safari/Chrome
+
+**Option 2: Native iOS App**
+- Use URLSessionWebSocketTask for WebSocket
+- AVAudioEngine for recording/playback
+- Send audio as binary or base64 JSON
+
+**Option 3: Bluetooth (Not Recommended)**
+- Requires custom BLE audio profile
+- Complex setup, not standard
+- Better to use WiFi/WebSocket
+
+---
+
 ## Future Considerations (Post-Alpha)
 
 1. **Multi-device support**: Device registration and routing
 2. **Caregiver dashboard**: Events, alerts, care plan management
 3. **Cloud fallback**: OpenAI as backup when local LLM struggles
 4. **Authentication**: Device pairing, user management
-5. **Sensors**: Additional inputs beyond voice
+5. **Mobile companion app**: iOS/Android client for testing
 
 ---
 

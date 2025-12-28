@@ -62,7 +62,9 @@ class PiperSynthesizer:
                 try:
                     os.makedirs(self.model_path, exist_ok=True)
                     # Download from Piper's model repository
-                    base_url = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/{self.voice}"
+                    # Extract quality level from voice name (e.g., en_US-lessac-low -> low)
+                    quality = self.voice.split("-")[-1]  # low, medium, or high
+                    base_url = f"https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/{quality}/{self.voice}"
                     urllib.request.urlretrieve(f"{base_url}.onnx", onnx_file)
                     urllib.request.urlretrieve(f"{base_url}.onnx.json", json_file)
                     logger.info("piper_model_downloaded", voice=self.voice)

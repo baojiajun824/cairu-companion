@@ -7,31 +7,31 @@ cAIru is a wellness companion that provides conversation and proactive check-ins
 ## 🏗️ Architecture
 
 ```
-Companion Device (mic/speaker)
+Companion Device / Test Client (mic/speaker)
         │
-        │ WebSocket (audio)
+        │ WebSocket (audio stream)
         ▼
-┌─────────────────────────────────────────────┐
-│              BASE STATION                   │
-│                                             │
-│  Gateway → VAD → ASR → Orchestrator → LLM   │
-│     ↑                                  │    │
-│     └──────────── TTS ←────────────────┘    │
-│                                             │
-│  [Redis Streams]  [Ollama]  [SQLite]        │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                   BASE STATION                       │
+│                                                      │
+│  Gateway → VAD → ASR → Orchestrator → LLM → TTS     │
+│     ↑                                      │        │
+│     └──────────────────────────────────────┘        │
+│                                                      │
+│  [Redis Streams]  [Ollama]  [SQLite]                │
+└─────────────────────────────────────────────────────┘
 ```
 
 ### Services
 
 | Service | Purpose | Technology |
 |---------|---------|------------|
-| **gateway** | WebSocket for Companion | FastAPI |
-| **vad** | Voice Activity Detection | Silero VAD |
-| **asr** | Speech-to-Text | Faster-Whisper |
+| **gateway** | WebSocket audio streaming | FastAPI |
+| **vad** | Voice Activity Detection | Silero VAD / Energy-based |
+| **asr** | Speech-to-Text | Faster-Whisper (tiny.en) |
 | **orchestrator** | State, memory, rules | SQLite |
-| **llm** | Response generation | Ollama (Phi-3) |
-| **tts** | Text-to-Speech | Piper |
+| **llm** | Response generation | Ollama (qwen2:0.5b) |
+| **tts** | Text-to-Speech | Piper (lessac-low) |
 
 ## 🚀 Quick Start
 
@@ -44,21 +44,32 @@ Companion Device (mic/speaker)
 ### Setup
 
 ```bash
-# Run setup script
-./scripts/setup_dev.sh
+# Clone and enter directory
+cd cairu-companion
 
-# Start development environment
-make dev
+# Create Python virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+pip install websockets sounddevice numpy
+
+# Start all services
+docker compose up -d
+
+# Wait for services to be healthy (~60s for model downloads)
+docker compose ps
 ```
 
-### Test Connection
+### Test with Microphone
 
 ```bash
-# With services running
-python scripts/test_pipeline.py
+# Start the test client (streams audio, server does VAD)
+python scripts/test_streaming.py
+
+# Test against remote N100
+python scripts/test_streaming.py --gateway ws://N100-IP:8080/ws
 ```
 
-### Access
+### Access Points
 
 - **WebSocket**: `ws://localhost:8080/ws`
 - **Health Check**: `http://localhost:8080/health`
@@ -66,17 +77,17 @@ python scripts/test_pipeline.py
 ## 📁 Project Structure
 
 ```
-calru-companion-ai/
+cairu-companion/
 ├── services/
 │   ├── gateway/        # WebSocket entry point
 │   ├── vad/            # Voice Activity Detection
-│   ├── asr/            # Speech Recognition
+│   ├── asr/            # Speech Recognition  
 │   ├── orchestrator/   # Central brain
 │   ├── llm/            # Language model
 │   └── tts/            # Text-to-Speech
-├── shared/             # Common library
-├── config/             # Rules, Prometheus
-├── scripts/            # Setup, deploy
+├── shared/             # Common library (cairu_common)
+├── config/             # Rules, Prometheus config
+├── scripts/            # Test clients, deploy scripts
 ├── docker-compose.yml  # Production config
 └── Makefile            # Dev commands
 ```
@@ -86,59 +97,74 @@ calru-companion-ai/
 ### Commands
 
 ```bash
-make dev        # Start with hot-reload
-make up         # Start production mode
-make down       # Stop all
-make logs       # Follow logs
-make logs-llm   # Specific service logs
+docker compose up -d      # Start all services
+docker compose down       # Stop all
+docker compose logs -f    # Follow logs
+docker compose logs llm   # Specific service logs
+docker compose ps         # Check health status
 ```
 
-### Running Services Individually
+### Clear Conversation History
 
 ```bash
-# Start infrastructure only
-docker compose up -d redis ollama
-
-# Activate venv and run a service
-source venv/bin/activate
-cd services/orchestrator && python -m src.main
+docker compose exec orchestrator rm -f /app/data/cairu.db
+docker compose restart orchestrator
 ```
 
 ## 🚢 Deploy to N100
 
 ```bash
-export N100_HOST=192.168.1.x
-make deploy
+# Copy project to N100
+scp -r . user@n100-ip:/opt/cairu-companion
+
+# SSH and start
+ssh user@n100-ip
+cd /opt/cairu-companion
+docker compose up -d
 ```
+
+## 📱 Connecting from iPhone/Mobile
+
+Options for sending audio to the Base Station:
+
+1. **Web Client** (Recommended): Open `http://n100-ip:8080` in Safari
+2. **Test from Mac**: Run `python scripts/test_continuous.py --gateway ws://n100-ip:8080/ws`
+3. **Custom iOS App**: Build with WebSocket audio streaming
 
 ## 🔧 Configuration
 
-Copy `env.example` to `.env`:
+Environment variables in `docker-compose.yml`:
 
-```bash
-# LLM
-LLM_MODEL=phi3:mini
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_MODEL` | qwen2:0.5b | Ollama model (fastest) |
+| `WHISPER_MODEL` | tiny.en | ASR model size |
+| `PIPER_VOICE` | en_US-lessac-low | TTS voice |
 
-# ASR
-WHISPER_MODEL=small.en
+## ⚡ Performance Optimizations
 
-# TTS
-PIPER_VOICE=en_US-lessac-medium
-```
+| Optimization | Status | Impact |
+|--------------|--------|--------|
+| Ollama streaming | ✅ | Faster token delivery |
+| Sentence-level TTS | ✅ | First sentence plays faster |
+| Fast TTS voice | ✅ | ~200ms saved |
+| Server-side VAD | ✅ | Boundary detection |
 
-## 📊 Latency Target
+### Expected Latency (N100)
 
-| Stage | Target |
-|-------|--------|
-| VAD | 10ms |
-| ASR | 300ms |
-| LLM | 350ms |
-| TTS | 50ms |
-| **Total** | **<800ms** |
+| Component | Latency |
+|-----------|---------|
+| VAD | ~50ms |
+| ASR | ~800-1200ms |
+| LLM | ~3-6 seconds |
+| TTS | ~200-400ms |
+| **Total** | **~5-8 seconds** |
 
-## 📚 Docs
+*Note: LLM is the bottleneck on CPU-only hardware.*
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — System design
+## 📚 Documentation
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — Detailed system design
 
 ---
 
