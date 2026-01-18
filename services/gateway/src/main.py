@@ -180,6 +180,7 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error("websocket_error", device_id=device_id, error=str(e))
     finally:
         manager.disconnect(device_id)
+        router.reset_session(device_id)  # Reset session for fresh conversation on reconnect
         ACTIVE_SESSIONS.set(0)
 
 

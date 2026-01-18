@@ -6,6 +6,7 @@ Simplified for Alpha: Single device, streamlined routing.
 
 import asyncio
 import base64
+import uuid
 from datetime import datetime
 from typing import Any
 
@@ -32,6 +33,20 @@ class AudioRouter:
     def __init__(self, redis_client: RedisStreamClient):
         self.redis = redis_client
         self._pending_requests: dict[str, datetime] = {}  # session_id -> start_time
+        self._device_sessions: dict[str, str] = {}  # device_id -> session_id
+
+    def _get_session_id(self, device_id: str) -> str:
+        """Get or create session ID for a device."""
+        if device_id not in self._device_sessions:
+            self._device_sessions[device_id] = f"{device_id}-{uuid.uuid4().hex[:8]}"
+            logger.info("new_session_created", device_id=device_id, session_id=self._device_sessions[device_id])
+        return self._device_sessions[device_id]
+
+    def reset_session(self, device_id: str) -> None:
+        """Reset session for a device (called on disconnect)."""
+        if device_id in self._device_sessions:
+            old_session = self._device_sessions.pop(device_id)
+            logger.info("session_reset", device_id=device_id, old_session=old_session)
 
     async def route_audio(
         self,
@@ -52,8 +67,8 @@ class AudioRouter:
         Returns:
             Message ID from Redis
         """
-        # Use consistent session ID for tracking
-        session_id = f"{device_id}-session"
+        # Use unique session ID per connection (resets on reconnect)
+        session_id = self._get_session_id(device_id)
 
         segment = AudioSegment(
             device_id=device_id,
