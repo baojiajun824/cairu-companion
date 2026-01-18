@@ -16,7 +16,7 @@ This document describes the Base Station architecture for the Alpha build.
 | Goal | Description |
 |------|-------------|
 | **Local-First** | All functionality runs without internet |
-| **Low Latency** | <800ms response time for simple conversational turns |
+| **Low Latency** | Target <1s, realistic ~5-8s on N100 |
 | **Simple** | Single device, single user, minimal complexity |
 | **Observable** | Comprehensive logging and metrics |
 
@@ -26,18 +26,18 @@ This document describes the Base Station architecture for the Alpha build.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              COMPANION DEVICE                                │
-│                    (mic, speaker, display — black box for Alpha)            │
+│                         CLIENT (Mac/iPhone/Companion)                        │
+│                              (mic, speaker)                                  │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
-                                      │ Audio Stream (WebSocket)
+                                      │ Audio Stream (WebSocket over WiFi)
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                               BASE STATION                                   │
+│                               BASE STATION (N100)                            │
 │                                                                              │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │                         GATEWAY SERVICE                               │   │
-│  │                   (WebSocket, single device)                          │   │
+│  │                   (WebSocket at ws://IP:8080/ws)                      │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 │                                      │                                       │
 │                                      ▼                                       │
@@ -50,7 +50,14 @@ This document describes the Base Station architecture for the Alpha build.
 │  ┌──────────┐   ┌──────────┐   ┌──────────────┐   ┌──────────┐   ┌────────┐ │
 │  │   VAD    │ → │   ASR    │ → │ ORCHESTRATOR │ → │   LLM    │ → │  TTS   │ │
 │  │  Silero  │   │ Whisper  │   │    State     │   │  Ollama  │   │ Piper  │ │
+│  │ (10ms)   │   │ (1000ms) │   │   (50ms)     │   │ (3-6s)   │   │(300ms) │ │
 │  └──────────┘   └──────────┘   └──────────────┘   └──────────┘   └────────┘ │
+│                                                                              │
+│  ┌──────────────────────────────────────────────────────────────────────┐   │
+│  │                         DATA STORES                                   │   │
+│  │                                                                       │   │
+│  │   SQLite (conversations, profiles)    Ollama (LLM models)            │   │
+│  └──────────────────────────────────────────────────────────────────────┘   │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -62,75 +69,78 @@ This document describes the Base Station architecture for the Alpha build.
 ### Reactive Flow (User Speaks)
 
 ```
-1. Companion captures audio continuously
-2. Audio streamed to Gateway via WebSocket (ws://basestation:8080/ws)
-3. Gateway → VAD: Check for voice activity
-4. If voice detected:
+1. Client streams audio continuously to Gateway via WebSocket
+2. Gateway → VAD: Voice activity detection (server-side)
+3. VAD detects speech boundaries (start/end of utterance)
+4. If complete utterance detected:
    a. VAD → ASR: Transcribe speech to text
-   b. ASR → Orchestrator: Process with context
-   c. Orchestrator → LLM: Generate response
-   d. LLM → Orchestrator: Receive response
-   e. Orchestrator → TTS: Convert to speech
-   f. TTS → Gateway: Audio + metadata
-   g. Gateway → Companion: Playback
+   b. ASR → Orchestrator: Build context + prompt
+   c. Orchestrator → LLM: Generate response (streaming)
+   d. LLM → TTS: Each sentence streamed individually
+   e. TTS → Gateway: Audio for each sentence
+   f. Gateway → Client: Playback (sentence by sentence)
 ```
 
-### Proactive Flow (System Initiates)
+### Key Optimization: Sentence Streaming
 
-```
-1. Orchestrator runs scheduled rules (morning check-in, reminders, etc.)
-2. Rule triggers → Orchestrator → LLM → TTS → Gateway → Companion
-3. System awaits response (returns to reactive flow)
-```
+Instead of waiting for the full LLM response, we:
+1. Stream LLM output token-by-token
+2. Detect sentence boundaries (., !, ?)
+3. Send each complete sentence to TTS immediately
+4. Client plays first sentence while LLM generates the rest
+
+This reduces perceived latency from ~8s to ~5s.
 
 ---
 
 ## Service Descriptions
 
 ### Gateway Service
-- **Purpose**: Entry point for the Companion device
-- **Protocol**: WebSocket at `/ws` (no auth for Alpha)
+- **Purpose**: Entry point for client devices
+- **Protocol**: WebSocket at `/ws`
 - **Responsibilities**:
-  - Accept single device connection
-  - Route audio to pipeline
-  - Return responses with audio
+  - Accept WebSocket connections
+  - Handle both binary audio and JSON-wrapped base64 audio
+  - Route responses back to clients
+  - Health check at `/health`
 
 ### VAD Service (Voice Activity Detection)
-- **Purpose**: Filter silence/noise from speech
-- **Model**: Silero VAD (~2ms latency)
+- **Purpose**: Detect when user starts/stops speaking
+- **Model**: Silero VAD (with energy-based fallback)
 - **Responsibilities**:
-  - Detect speech start/end
-  - Only forward audio with speech
+  - Server-side speech boundary detection
+  - Accumulate audio until utterance complete
+  - Only forward complete utterances to ASR
 
 ### ASR Service (Automatic Speech Recognition)
 - **Purpose**: Convert speech to text
-- **Model**: Faster-Whisper (small.en)
+- **Model**: Faster-Whisper `tiny.en` (~1s latency)
 - **Responsibilities**:
   - Transcribe audio segments
-  - Handle elderly speech patterns
+  - Output text with confidence scores
 
 ### Orchestrator Service
 - **Purpose**: Central brain of the system
 - **Responsibilities**:
-  - Conversation state management
+  - Conversation state management (SQLite)
   - User profile and memory
-  - Proactive rules engine
-  - LLM prompt construction
+  - Build LLM prompts with context
+  - Enforce response brevity
 
 ### LLM Service
 - **Purpose**: Natural language generation
-- **Model**: Ollama with qwen2:0.5b (fastest) or phi3:mini (better quality)
+- **Model**: Ollama with `qwen2:0.5b` (fastest for CPU)
 - **Responsibilities**:
   - Generate conversational responses
-  - Sentence-level streaming to TTS
-  - Fallback to static responses if needed
+  - **Streaming**: Output sentences as they complete
+  - Send each sentence directly to TTS
 
 ### TTS Service (Text-to-Speech)
 - **Purpose**: Convert text to natural speech
-- **Model**: Piper TTS (CPU-optimized)
+- **Model**: Piper TTS `en_US-lessac-low`
 - **Responsibilities**:
-  - Synthesize warm, calming voice
-  - Stream audio back to Gateway
+  - Synthesize audio for each sentence
+  - Return audio to Gateway for playback
 
 ---
 
@@ -143,39 +153,40 @@ This document describes the Base Station architecture for the Alpha build.
 | **Message Bus** | Redis Streams | Lightweight, persistent |
 | **Database** | SQLite | Simple, local, no dependencies |
 | **Containers** | Docker Compose | Isolation, reproducibility |
-| **ASR** | Faster-Whisper | Optimized for CPU |
-| **LLM** | Ollama | Easy local model management |
-| **TTS** | Piper | Fast CPU inference |
+| **ASR** | Faster-Whisper tiny.en | Fastest for CPU |
+| **LLM** | Ollama qwen2:0.5b | Smallest capable model |
+| **TTS** | Piper lessac-low | Fast CPU inference |
 | **VAD** | Silero VAD | Tiny, fast |
 
 ---
 
-## Latency Budget
+## Latency Analysis
 
-### Target (Ideal Hardware)
+### Measured on N100 (CPU-only)
 
-| Stage | Target | Notes |
-|-------|--------|-------|
-| Audio transmission | 50ms | WebSocket, local network |
-| VAD | 10ms | Energy-based or Silero |
-| ASR | 300ms | Whisper streaming |
-| Orchestrator | 20ms | State lookup, prompt build |
-| LLM | 350ms | With GPU acceleration |
-| TTS | 50ms | Piper streaming |
-| **Total** | **780ms** | Meets target with GPU |
-
-### Reality (N100 CPU-only)
-
-| Stage | Actual | Notes |
-|-------|--------|-------|
+| Stage | Latency | Notes |
+|-------|---------|-------|
+| Network (WiFi) | ~5ms | Local network, negligible |
 | VAD | ~50ms | Energy-based detection |
-| ASR | ~800-1200ms | tiny.en model |
-| Orchestrator | ~50ms | SQLite queries |
-| LLM | ~3-6 seconds | qwen2:0.5b on CPU |
+| ASR | ~800-1200ms | Whisper tiny.en |
+| Orchestrator | ~50ms | SQLite + prompt build |
+| LLM (first sentence) | ~3-6s | qwen2:0.5b streaming |
 | TTS | ~200-400ms | Piper low voice |
-| **Total** | **~5-8 seconds** | CPU bottleneck |
+| **Total to first audio** | **~5-8s** | |
 
-*Note: LLM inference is the bottleneck on CPU. GPU or cloud API would dramatically improve.*
+### Bottleneck Analysis
+
+```
+LLM inference: ████████████████████████████ 70%
+ASR:           ██████████ 20%
+TTS:           ███ 7%
+Other:         █ 3%
+```
+
+**The LLM is the bottleneck.** Improving it requires:
+- GPU acceleration (not available on N100)
+- Cloud API fallback (adds latency, requires internet)
+- Better local models (as they become available)
 
 ---
 
@@ -195,71 +206,118 @@ care_plans: user_id, medications, routines, contacts
 learned_facts: user_id, fact_type, fact_key, fact_value
 ```
 
+Database location: `/app/data/cairu.db` (inside orchestrator container)
+
 ---
 
 ## Message Bus Topics (Redis Streams)
 
-| Stream | Publisher | Consumer |
-|--------|-----------|----------|
-| `cairu:audio:inbound` | Gateway | VAD |
-| `cairu:audio:segments` | VAD | ASR |
-| `cairu:text:transcripts` | ASR | Orchestrator |
-| `cairu:llm:requests` | Orchestrator | LLM |
-| `cairu:llm:responses` | LLM | Orchestrator |
-| `cairu:tts:requests` | Orchestrator | TTS |
-| `cairu:audio:outbound` | TTS | Gateway |
+| Stream | Publisher | Consumer | Data |
+|--------|-----------|----------|------|
+| `cairu:audio:inbound` | Gateway | VAD | Raw audio chunks |
+| `cairu:audio:segments` | VAD | ASR | Complete utterances |
+| `cairu:text:transcripts` | ASR | Orchestrator | Transcribed text |
+| `cairu:llm:requests` | Orchestrator | LLM | Prompt + context |
+| `cairu:llm:responses` | LLM | Orchestrator | Full response |
+| `cairu:tts:requests` | LLM | TTS | Each sentence |
+| `cairu:audio:outbound` | TTS | Gateway | Audio + text |
+
+---
+
+## Configuration
+
+### Models (in `shared/cairu_common/config.py`)
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| `whisper_model` | `tiny.en` | Fastest ASR |
+| `llm_model` | `qwen2:0.5b` | Fastest LLM for CPU |
+| `piper_voice` | `en_US-lessac-low` | Fast TTS voice |
+
+### Environment Variables
+
+Set in `docker-compose.yml`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_URL` | `redis://redis:6379` | Redis connection |
+| `OLLAMA_URL` | `http://ollama:11434` | Ollama API |
+| `LOG_LEVEL` | `INFO` | Logging verbosity |
+
+---
+
+## Network Architecture
+
+```
+┌─────────────┐         WiFi           ┌─────────────────┐
+│   Client    │ ◄─────────────────────► │  N100 Base      │
+│   (Mac)     │    ws://IP:8080/ws      │  Station        │
+│             │                         │                 │
+│   🎤 Mic    │    ~5ms latency         │   Docker        │
+│   🔊 Speaker│    (local network)      │   Containers    │
+└─────────────┘                         └─────────────────┘
+```
+
+**Why WiFi over Bluetooth?**
+- WiFi: 1-5ms latency
+- Bluetooth: 40-200ms latency (codec overhead)
+- WiFi supports full duplex, higher bandwidth
 
 ---
 
 ## Project Structure
 
 ```
-cairu-base-station/
+cairu-companion/
 ├── docker-compose.yml          # Service orchestration
-├── docker-compose.dev.yml      # Development overrides
-├── env.example                 # Environment template
 ├── Makefile                    # Common commands
 │
 ├── services/
 │   ├── gateway/               # WebSocket entry point
+│   │   └── src/
+│   │       ├── main.py        # FastAPI app
+│   │       ├── websocket.py   # Connection manager
+│   │       └── routing.py     # Audio routing
+│   │
 │   ├── vad/                   # Voice Activity Detection
+│   │   └── src/
+│   │       ├── main.py        # Service entry
+│   │       └── detector.py    # Silero VAD wrapper
+│   │
 │   ├── asr/                   # Speech Recognition
-│   ├── orchestrator/          # Central brain, rules
+│   │   └── src/
+│   │       ├── main.py        # Service entry
+│   │       └── transcriber.py # Whisper wrapper
+│   │
+│   ├── orchestrator/          # Central brain
+│   │   └── src/
+│   │       ├── main.py        # Service entry
+│   │       ├── state.py       # SQLite state manager
+│   │       └── prompts/       # LLM prompt templates
+│   │
 │   ├── llm/                   # Language model
+│   │   └── src/
+│   │       ├── main.py        # Service entry
+│   │       ├── router.py      # Model selection
+│   │       └── backends/      # Ollama backend
+│   │
 │   └── tts/                   # Text-to-Speech
+│       └── src/
+│           ├── main.py        # Service entry
+│           └── synthesizer.py # Piper wrapper
 │
 ├── shared/
 │   └── cairu_common/          # Shared library
+│       ├── config.py          # Centralized config
+│       ├── models.py          # Pydantic models
+│       ├── redis_client.py    # Redis wrapper
+│       └── logging.py         # Structured logging
 │
-├── config/
-│   └── rules/                 # Proactive rule definitions
+├── scripts/
+│   └── test_streaming.py      # Voice test client
 │
-└── scripts/
-    ├── setup_dev.sh           # Developer setup
-    └── deploy.sh              # N100 deployment
-```
-
----
-
-## Development Workflow
-
-### Local Development (MacBook)
-
-```bash
-# Start infrastructure
-docker compose up -d redis ollama
-
-# Run services locally
-cd services/orchestrator && python -m src.main
-
-# Or run everything
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up
-```
-
-### Deployment to N100
-
-```bash
-./scripts/deploy.sh 192.168.1.x
+└── config/
+    └── rules/                 # Proactive rule definitions
 ```
 
 ---
@@ -268,50 +326,23 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 
 | Area | Simplification |
 |------|----------------|
-| **Devices** | Single device, hardcoded ID |
+| **Devices** | Single device, no registration |
 | **Users** | Single user, no auth |
 | **Dashboard** | Not implemented |
 | **Events** | Not implemented |
-| **Cloud** | No cloud fallback, local only |
-
----
-
-## Connecting to Base Station
-
-### From Mac/PC (Testing)
-
-```bash
-# Set gateway to N100 IP
-python scripts/test_continuous.py --gateway ws://192.168.1.x:8080/ws
-```
-
-### From iPhone/Mobile
-
-**Option 1: Web Client** (Easiest)
-- Build a simple HTML5 web page with WebSocket + Web Audio API
-- Host on N100, access via `http://192.168.1.x:8080`
-- Works in Safari/Chrome
-
-**Option 2: Native iOS App**
-- Use URLSessionWebSocketTask for WebSocket
-- AVAudioEngine for recording/playback
-- Send audio as binary or base64 JSON
-
-**Option 3: Bluetooth (Not Recommended)**
-- Requires custom BLE audio profile
-- Complex setup, not standard
-- Better to use WiFi/WebSocket
+| **Cloud** | No cloud fallback |
 
 ---
 
 ## Future Considerations (Post-Alpha)
 
-1. **Multi-device support**: Device registration and routing
-2. **Caregiver dashboard**: Events, alerts, care plan management
-3. **Cloud fallback**: OpenAI as backup when local LLM struggles
-4. **Authentication**: Device pairing, user management
-5. **Mobile companion app**: iOS/Android client for testing
+1. **GPU Acceleration**: Add support for Intel Arc GPU or external GPU
+2. **Cloud Fallback**: Use OpenAI/Claude API when local LLM struggles
+3. **Multi-device**: Support multiple companions per base station
+4. **Caregiver Dashboard**: Web UI for care plan management
+5. **Mobile App**: iOS/Android client for family members
+6. **Wake Word**: "Hey Cairu" activation
 
 ---
 
-*Last Updated: December 2025*
+*Last Updated: January 2026*
